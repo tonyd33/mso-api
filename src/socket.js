@@ -1,6 +1,7 @@
 #!/bin/env node
 
 import readline from "readline";
+import EventEmitter from "events";
 
 import axios from "axios";
 import WebSocket from "ws";
@@ -9,12 +10,24 @@ import _ from "lodash";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 
-import { isMain } from "./lib.js";
+import { isMain, swapKV, createPromiseHandlers } from "./lib.js";
 import Game, { GameError, GameErrorType } from "./game.js";
-import { createPromiseHandlers } from "./lib.js";
 import logger from "./logger.js";
 
-export default class GameSocket {
+const opcode2Description = {
+    "G69.i41": "syncGame",
+    "G68.t18": "click",
+    "R35.u43": "endGame",
+};
+
+const description2Opcode = swapKV(opcode2Description);
+
+/**
+ * Socket for Minesweeper Online games.
+ * Exposes method for sending raw payloads and also user-friendly methods
+ * for common actions.
+ */
+export default class GameSocket extends EventEmitter {
     authKey;
     session;
     userId;
@@ -23,6 +36,9 @@ export default class GameSocket {
     ws;
     pinger;
 
+    // We can multiplex this socket into multiple games, but this makes
+    // all public functions require referencing a game id, which is just
+    // annoying for the user. Just open another socket for a different game.
     game;
 
     #httpHeaders = {
@@ -34,28 +50,34 @@ export default class GameSocket {
         Referer: "https://minesweeper.online/",
     };
 
-    #fnHandlers;
-
     constructor({ authKey, session, userId, server }) {
+        super();
+
         this.authKey = authKey;
         this.session = session;
         this.userId = userId;
         this.server = server;
 
-        this.#fnHandlers = {
-            "G69.i41": this.#handleSyncGame.bind(this),
-            "G68.t18": this.#handleClickResponse.bind(this),
-            "R35.u43": this.#handleGameOver.bind(this),
-        };
+        this.#addGameLogicListeners();
     }
 
-    async initSession() {
-        logger.debug("Getting sid");
+    /**
+     * Opens a WebSocket to Minesweeper Online, returning a promise that
+     * resolves after the 3 way handshake for initialization has completed.
+     *
+     * 1. Request socket id
+     * 2. Authorize socket id
+     * 3. Establish WebSocket connection
+     * 4. WebSocket handshake
+     */
+    async open() {
+        // 1. Request socket id
+        logger.debug("Requesting sid");
         const sidResponse = await axios({
             method: "GET",
             url: `https://${this.server}.minesweeper.online/mine-websocket/`,
             params: {
-                ...this.authParams,
+                ...this.#authParams,
                 transport: "polling",
             },
             headers: this.#httpHeaders,
@@ -63,12 +85,12 @@ export default class GameSocket {
         const jsonData = JSON.parse(sidResponse.data.slice(4, -4));
         this.sid = jsonData.sid;
 
-        // Authorization
+        // 2. Authorize socket id
         const sidAuthResponse = await axios({
             method: "GET",
             url: `https://${this.server}.minesweeper.online/mine-websocket/`,
             params: {
-                ...this.authParams,
+                ...this.#authParams,
                 transport: "polling",
                 sid: this.sid,
             },
@@ -79,18 +101,31 @@ export default class GameSocket {
         }
 
         const wsParams = new URLSearchParams({
-            ...this.authParams,
+            ...this.#authParams,
             transport: "websocket",
             sid: this.sid,
         });
 
+        // 3. Establish WebSocket connection
         logger.debug("Opening websocket");
         const wsUrl = `wss://${
             this.server
         }.minesweeper.online/mine-websocket/?${wsParams.toString()}`;
 
         this.ws = new WebSocket(wsUrl);
+
+        // 4. WebSocket handshake
         await this.#addWSEventListeners();
+    }
+
+    async close() {
+        this.ws.close()
+    }
+
+    #addGameLogicListeners() {
+        this.on("syncGame", this.#handleSyncGame);
+        this.on("click", this.#handleClickResponse);
+        this.on("endGame", this.#handleGameOver);
     }
 
     #addWSEventListeners() {
@@ -123,7 +158,7 @@ export default class GameSocket {
                     this.#initPinger();
                     resolve();
 
-                    // Add the normal event listener
+                    // Add the normal event listener once this is complete
                     ws.addEventListener("message", this.#onMessage.bind(this));
                 }
             },
@@ -155,7 +190,7 @@ export default class GameSocket {
         }
     }
 
-    get authParams() {
+    get #authParams() {
         return {
             authKey: this.authKey,
             session: this.session,
@@ -181,14 +216,14 @@ export default class GameSocket {
                 logger.error(`Expected response, got ${jsonArr[0]}`);
                 return;
             }
-            const fn = jsonArr[1][0];
+            const opcode = jsonArr[1][0];
             const payload = jsonArr[1][1];
 
-            const handler = this.#fnHandlers[fn];
-            if (handler) {
-                handler(...payload);
+            const description = opcode2Description[opcode];
+            if (!description || this.listeners(description).length === 0) {
+                logger.warn(`Received unhandled opcode ${opcode}`);
             } else {
-                logger.warn(`Received unhandled function ${fn}`);
+                this.emit(description, ...payload);
             }
         } catch (err) {
             logger.error(err);
@@ -197,7 +232,6 @@ export default class GameSocket {
 
     #handleSyncGame(...args) {
         this.game = new Game(...args);
-        logger.info(`Game ${this.game.id} started`);
     }
 
     #handleClickResponse(...args) {
@@ -259,6 +293,69 @@ export default class GameSocket {
     }
 }
 
+class InteractiveGameSocket extends GameSocket {
+    constructor(...args) {
+        super(...args);
+
+        // These must be called after `GameSocket` handlers
+        this.on("syncGame", this.#handleSyncGame);
+        this.on("click", this.#handleClickResponse);
+        this.on("endGame", this.#handleGameOver);
+
+        const commandHandlers = {
+            newGame: this.newGame.bind(this),
+            click: this.click.bind(this),
+            restoreGame: this.restoreGame.bind(this),
+            printBoard: this.printBoard.bind(this),
+        };
+
+        this.aliases = {
+            ...commandHandlers,
+            ng: commandHandlers.newGame,
+            c: commandHandlers.click,
+            rg: commandHandlers.restoreGame,
+            p: commandHandlers.printBoard,
+            pb: commandHandlers.printBoard,
+        };
+    }
+
+    printBoard() {
+        logger.info("\n" + this.game.toString(), { raw: true });
+    }
+
+    handleCommand(command, args) {
+        const fn = this.aliases[command];
+        if (!fn) {
+            logger.warn("Unknown command");
+            return
+        }
+
+        fn(...args)
+    }
+
+    #handleSyncGame() {
+        logger.info(
+            `Game synced.
+id: ${this.game.id}
+width: ${this.game.sizeX}
+height: ${this.game.sizeY}
+mines: ${this.game.mines}
+timeElapsed: ${this.game.timeElapsed}`,
+            { raw: true }
+        );
+        this.printBoard();
+    }
+
+    #handleClickResponse() {
+        this.printBoard();
+    }
+
+    #handleGameOver() {
+        logger.info("Game over");
+        this.printBoard();
+    }
+}
+
 async function main() {
     const parsed = await yargs(hideBin(process.argv))
         .option("auth-key", { type: "string", demandOption: true })
@@ -276,7 +373,7 @@ async function main() {
         input: process.stdin,
         output: process.stdout,
     });
-    const socket = new GameSocket({
+    const socket = new InteractiveGameSocket({
         authKey,
         session,
         userId,
@@ -284,8 +381,14 @@ async function main() {
     });
 
     logger.debug("Initializing session");
-    await socket.initSession();
+    await socket.open();
     logger.debug("Initialized session");
+
+    rl.on('close', async () => {
+        logger.info("Exiting gracefully...")
+        await socket.close()
+        process.exit(0)
+    })
 
     while (true) {
         const proc = await rl.question("> ");
@@ -301,25 +404,21 @@ async function main() {
             eval(parts.slice(1).join(" "));
         }
 
-        if (meth in socket) {
-            try {
-                socket[meth](...parts.slice(1));
-            } catch (err) {
-                if (err instanceof GameError) {
-                    switch (err.type) {
-                        case GameErrorType.noGame:
-                            logger.warn("Couldn't complete because no game");
-                        case GameErrorType.invalidInput:
-                            logger.warn("Invalid input");
-                        case GameErrorType.mismatch:
-                            logger.warn(err.message);
-                    }
-                } else {
-                    throw err;
+        try {
+            socket.handleCommand(meth, parts.slice(1));
+        } catch (err) {
+            if (err instanceof GameError) {
+                switch (err.type) {
+                    case GameErrorType.noGame:
+                        logger.warn("Couldn't complete because no game");
+                    case GameErrorType.invalidInput:
+                        logger.warn("Invalid input");
+                    case GameErrorType.mismatch:
+                        logger.warn(err.message);
                 }
+            } else {
+                throw err;
             }
-
-            continue;
         }
     }
 }

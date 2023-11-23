@@ -43,6 +43,10 @@ export default class Game {
         return this.gameInfo.sizeY;
     }
 
+    get mines() {
+        return this.gameInfo.mines;
+    }
+
     get clickNum() {
         return this.history.length;
     }

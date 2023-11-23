@@ -15,7 +15,8 @@ const logger = winston.createLogger({
             const scopeStr = info.scope ? `[${info.scope}] ` : "";
             const levelPadded = info.level.padStart(15, " ");
 
-            return `${info.timestamp} ${levelPadded}: ${scopeStr}${info.message}${stackInfo}`;
+            return `${levelPadded}: ${scopeStr}${info.message}${stackInfo}`;
+            // return `${info.timestamp} ${levelPadded}: ${scopeStr}${info.message}${stackInfo}`;
         })
     ),
     transports: [new winston.transports.Console()],

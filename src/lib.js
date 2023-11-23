@@ -59,3 +59,10 @@ export function createPromiseHandlers() {
         reject,
     };
 }
+
+export function swapKV(dict) {
+    return Object.keys(dict).reduce((ret, key) => {
+        ret[dict[key]] = key;
+        return ret;
+    }, {});
+}
