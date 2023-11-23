@@ -119,7 +119,48 @@ export default class GameSocket extends EventEmitter {
     }
 
     async close() {
-        this.ws.close()
+        this.ws.close();
+    }
+
+    sendGameMessage(fn, payload) {
+        const message = `42["request",["${fn}",${JSON.stringify(
+            payload
+        )},"494"]]`;
+        logger.debug(message);
+        this.ws.send(message);
+    }
+
+    newGame() {
+        logger.debug("Starting new game");
+        const payload = [
+            1,
+            null,
+            null,
+            null,
+            null,
+            37,
+            1,
+            null,
+            "CA",
+            null,
+            null,
+            null,
+            null,
+        ];
+        this.sendGameMessage("gn16", payload);
+    }
+
+    click(clickButton, x, y) {
+        const clickMessage = this.game.generateClickMessage(clickButton, x, y);
+
+        this.sendGameMessage("gu57", clickMessage);
+    }
+
+    restoreGame(id) {
+        id = parseInt(id, 10);
+        const payload = [id, null, "CA", 0];
+
+        this.sendGameMessage("gj4", payload);
     }
 
     #addGameLogicListeners() {
@@ -250,47 +291,6 @@ export default class GameSocket extends EventEmitter {
         this.game.gameInfo = gameInfo;
         this.game.boardOverlays = boardOverlays;
     }
-
-    sendGameMessage(fn, payload) {
-        const message = `42["request",["${fn}",${JSON.stringify(
-            payload
-        )},"494"]]`;
-        logger.debug(message);
-        this.ws.send(message);
-    }
-
-    newGame() {
-        logger.debug("Starting new game");
-        const payload = [
-            1,
-            null,
-            null,
-            null,
-            null,
-            37,
-            1,
-            null,
-            "CA",
-            null,
-            null,
-            null,
-            null,
-        ];
-        this.sendGameMessage("gn16", payload);
-    }
-
-    click(clickButton, x, y) {
-        const clickMessage = this.game.generateClickMessage(clickButton, x, y);
-
-        this.sendGameMessage("gu57", clickMessage);
-    }
-
-    restoreGame(id) {
-        id = parseInt(id, 10);
-        const payload = [id, null, "CA", 0];
-
-        this.sendGameMessage("gj4", payload);
-    }
 }
 
 class InteractiveGameSocket extends GameSocket {
@@ -327,10 +327,10 @@ class InteractiveGameSocket extends GameSocket {
         const fn = this.aliases[command];
         if (!fn) {
             logger.warn("Unknown command");
-            return
+            return;
         }
 
-        fn(...args)
+        fn(...args);
     }
 
     #handleSyncGame() {
@@ -351,8 +351,23 @@ timeElapsed: ${this.game.timeElapsed}`,
     }
 
     #handleGameOver() {
-        logger.info("Game over");
-        this.printBoard();
+        let result;
+        const state = this.game.gameInfo.state;
+        switch (state) {
+            case 2:
+                result = "lost";
+                break
+            case 3:
+                result = "won";
+                break
+            default:
+                logger.warn(`Unknown game over state ${state}`);
+        }
+
+        if (result) {
+            logger.info(`Game complete, you ${result}`);
+            this.printBoard();
+        }
     }
 }
 
@@ -384,11 +399,11 @@ async function main() {
     await socket.open();
     logger.debug("Initialized session");
 
-    rl.on('close', async () => {
-        logger.info("Exiting gracefully...")
-        await socket.close()
-        process.exit(0)
-    })
+    rl.on("close", async () => {
+        logger.info("Exiting gracefully...");
+        await socket.close();
+        process.exit(0);
+    });
 
     while (true) {
         const proc = await rl.question("> ");
@@ -402,6 +417,7 @@ async function main() {
         // for debugging
         if (meth === "eval") {
             eval(parts.slice(1).join(" "));
+            continue
         }
 
         try {

@@ -11,7 +11,7 @@ const logger = winston.createLogger({
     ),
     transports: [
         new winston.transports.Console(),
-        new winston.transports.File({ filename: "sniff.log" }),
+        new winston.transports.File({ filename: "sniff.log", level: 'info' }),
     ],
 });
 
@@ -19,7 +19,7 @@ const app = express();
 const port = 8080;
 
 app.use(cors());
-app.use(bodyParser.json());
+app.use(bodyParser.raw({type: "application/octet-stream"}));
 
 app.post("/send", (req, res) => {
     logger.info(req.body);
@@ -32,5 +32,5 @@ app.post("/receive", (req, res) => {
 });
 
 app.listen(port, () => {
-    logger.info(`listening on port ${port}`);
+    logger.debug(`listening on port ${port}`);
 });
